@@ -1,0 +1,61 @@
+# Data folder
+/data/
+/data/*
+
+# Ignore JSON output files
+all_crops.json
+filtered_crops.json
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+.DS_Store
+Thumbs.db 
+
+# Common image formats (only in data folder)
+/data/**/*.jpg
+/data/**/*.jpeg
+/data/**/*.png
+/data/**/*.gif
+/data/**/*.bmp
+/data/**/*.tiff
+/data/**/*.tif
+/data/**/*.webp
+/data/**/*.svg
+/data/**/*.ico
+
+# Common video formats (only in data folder)
+/data/**/*.mp4
+/data/**/*.mov
+/data/**/*.avi
+/data/**/*.wmv
+/data/**/*.flv
+/data/**/*.mkv
+/data/**/*.webm
+/data/**/*.m4v
+/data/**/*.mpg
+/data/**/*.mpeg
+/data/**/*.3gp
+
+# Configuration files
+/config.json
+
+/PROCEDURE.md
