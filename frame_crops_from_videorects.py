@@ -1,3 +1,14 @@
+
+# =============================================================================
+#    LSHelper (Label Studio Helper) v1.0
+#    First published 2025 - Copyright, Jakob Wapenhensch
+#    License: CC BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/)
+#    https://creativecommons.org/licenses/by-nc/4.0/legalcode
+# =============================================================================
+
+
+
+
 import math
 import os
 import json
