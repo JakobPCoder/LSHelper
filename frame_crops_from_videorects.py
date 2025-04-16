@@ -427,37 +427,64 @@ def process_annotations_and_create_folders(video_folder, annotation_file, output
                     original_frame_data = original_crops_lookup[video_name].get(frame_number)
                     
                     if original_frame_data:
-                        # Generate all potential crop images for this frame
-                        # get_crops_from_frames yields (image_crop, crop_metadata)
+                        # Get the set of main track IDs that passed the filter for this frame
+                        passed_main_track_ids = passed_main_crops_lookup.get(frame_number, set())
+                        
+                        # Generate images for all original crops once to avoid redundant generation
+                        all_original_crops_generated = {} # { track_id: (image, metadata) }
                         potential_crops = get_crops_from_frames(image, original_frame_data, width, height)
-
                         for crop_image, crop_metadata in potential_crops:
+                            all_original_crops_generated[crop_metadata["track"]] = (crop_image, crop_metadata)
+
+                        # Iterate through the generated crops, focusing on the main ones that passed
+                        for track_id, (crop_image, crop_metadata) in all_original_crops_generated.items():
                             crop_class = crop_metadata["class"]
-                            crop_track = crop_metadata["track"]
-                            save_this_crop = False
 
-                            # Condition 1: Is it a main class crop that passed the filter?
-                            if crop_class == main_class:
-                                passed_crops_for_frame = passed_main_crops_lookup.get(frame_number, set())
-                                if crop_track in passed_crops_for_frame:
-                                    save_this_crop = True
+                            # Check if this is a main class crop that passed the filter
+                            if crop_class == main_class and track_id in passed_main_track_ids:
+                                # --- Save the Main Class Crop --- 
+                                main_save_dir = os.path.join(output_folder, video_name, track_id, crop_class)
+                                os.makedirs(main_save_dir, exist_ok=True)
+                                main_save_path = os.path.join(main_save_dir, f"{frame_number}.png")
+                                
+                                if not os.path.exists(main_save_path): # Avoid double counting if saved via another path
+                                    debug(f"Saving main crop {track_id} to {main_save_path}")
+                                    cv2.imwrite(main_save_path, crop_image)
+                                    total_saved_frames += 1 
+                                    frames_saved_for_video += 1
+                                
+                                # --- If exporting all, find and save associated conditional crops --- 
+                                if export_conditional:
+                                    main_crop_bbox_data = crop_metadata # Bbox of the main crop we just saved/checked
 
-                            # Condition 2: Is it a conditional class crop and the option is enabled?
-                            # Check if not already marked for saving to avoid double saves if main == conditional
-                            if not save_this_crop and export_conditional and crop_class in conditional_classes:
-                                save_this_crop = True
+                                    # Check all *other* original crops in the frame for association
+                                    for other_track_id, (other_crop_image, other_crop_metadata) in all_original_crops_generated.items():
+                                        # Skip if it's the main crop itself
+                                        if other_track_id == track_id:
+                                            continue
 
-                            if save_this_crop:
-                                # Create class-specific directory
-                                save_dir = os.path.join(output_folder, video_name, crop_track, crop_class)
-                                os.makedirs(save_dir, exist_ok=True)
+                                        other_crop_class = other_crop_metadata["class"]
+                                        # Is this other crop a conditional class?
+                                        if other_crop_class in conditional_classes:
+                                            # Is its center inside the main crop's bounding box?
+                                            cond_center_x = other_crop_metadata["x"] + other_crop_metadata["w"] / 2
+                                            cond_center_y = other_crop_metadata["y"] + other_crop_metadata["h"] / 2
+                                            
+                                            if is_point_in_rotated_rect(cond_center_x, cond_center_y, main_crop_bbox_data):
+                                                # Yes, save this conditional crop under the main crop's track ID
+                                                cond_save_dir = os.path.join(output_folder, video_name, track_id, # Main Track ID
+                                                                             other_crop_class,                  # Conditional Class
+                                                                             other_track_id)                  # Conditional Track ID
+                                                os.makedirs(cond_save_dir, exist_ok=True)
+                                                cond_save_path = os.path.join(cond_save_dir, f"{frame_number}.png")
+                                                
+                                                # Save only if it doesn't exist to prevent double saves/counts
+                                                if not os.path.exists(cond_save_path): 
+                                                    debug(f"Saving associated conditional crop {other_track_id} ({other_crop_class}) under main crop {track_id} to {cond_save_path}")
+                                                    cv2.imwrite(cond_save_path, other_crop_image)
+                                                    total_saved_frames += 1
+                                                    frames_saved_for_video += 1
 
-                                # Save the crop
-                                save_path = os.path.join(save_dir, f"{frame_number}.png")
-                                debug(f"Saving {crop_class} crop to {save_path}")
-                                cv2.imwrite(save_path, crop_image)
-                                total_saved_frames += 1
-                                frames_saved_for_video += 1
                 
                 frame_counter += 1
                 
