@@ -1,4 +1,3 @@
-
 # =============================================================================
 #    LSHelper (Label Studio Helper) v1.0
 #    First published 2025 - Copyright, Jakob Wapenhensch
@@ -51,6 +50,9 @@ def load_config():
       - annotation_file: Path to the JSON file with annotations.
       - output_folder: Path where the output folder structure will be created.
       - frame_spacing: Integer value indicating the frame extraction spacing.
+      - selected_class: The main class to filter for.
+      - selected_classes_selected: List of conditional classes.
+      - export_conditional_crops: Boolean indicating whether to export conditional crops.
 
     :return: A dictionary with the configuration settings.
     """
@@ -59,7 +61,10 @@ def load_config():
         "video_folder": "",
         "annotation_file": "",
         "output_folder": "",
-        "frame_spacing": 1
+        "frame_spacing": 1,
+        "selected_class": "",
+        "selected_classes_selected": [],
+        "export_conditional_crops": False
     }
     if not os.path.exists(config_path):
         save_config(default_config)
@@ -230,7 +235,7 @@ def get_resolution_from_video(video_path):
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     return width, height
 
-def process_annotations_and_create_folders(video_folder, annotation_file, output_folder, main_class, conditional_classes, logger=None):
+def process_annotations_and_create_folders(video_folder, annotation_file, output_folder, main_class, conditional_classes, logger=None, frame_spacing=1, export_conditional=False):
     """
     Create a nested folder structure in the output folder based on the annotation JSON, generate interpolated
     crop positions for each video that exists in both the video folder and the JSON, and save the combined
@@ -257,7 +262,11 @@ def process_annotations_and_create_folders(video_folder, annotation_file, output
     :param video_folder: Directory containing the video files.
     :param annotation_file: Annotation JSON file produced by Label Studio.
     :param output_folder: Directory where the nested folder structure will be generated.
+    :param main_class: The main class to filter for.
+    :param conditional_classes: List of conditional classes.
     :param logger: Optional logging function (accepting a string) to output warning and progress messages to the UI.
+    :param frame_spacing: Integer value indicating every nth frame to process (default: 1 - process all frames).
+    :param export_conditional: Boolean indicating whether to export conditional crops.
     """
     def debug(msg):
         print(msg)
@@ -305,7 +314,7 @@ def process_annotations_and_create_folders(video_folder, annotation_file, output
             else:
                 valid_videos.append(video_base)
 
-        for video_base in valid_videos:
+        for video_base in valid_videos[:]:  # Use a slice copy to avoid modifying while iterating
             if video_base not in annotation_tracks:
                 warn(f"WARNING: Video '{video_base}' exists in the folder but has no annotations in the JSON.")
                 valid_videos.remove(video_base)
@@ -343,27 +352,125 @@ def process_annotations_and_create_folders(video_folder, annotation_file, output
 
         save_crops_data(filtered_crops, "filtered_crops.json")
 
-        for video in filtered_crops:
-            video_name = video["video"]
-            video_path = os.path.join(video_folder, f"{video_name}.mp4")
+        # Log the frame spacing setting
+        if frame_spacing > 1:
+            progress(f"Using frame spacing: {frame_spacing} (processing every {frame_spacing}th frame)")
+        else:
+            progress("Processing all frames (frame spacing = 1)")
+
+        # Counter for total saved frames
+        total_saved_frames = 0
+        videos_processed = 0
+
+        # Store original crops for quick lookup:
+        original_crops_lookup = {} # { video_name: { frame_number: frame_data } }
+        for video_data in all_crops:
+            video_name = video_data["video"]
+            original_crops_lookup[video_name] = {}
+            for frame_data in video_data["frames"]:
+                original_crops_lookup[video_name][frame_data["frame"]] = frame_data
+
+        for filtered_video in filtered_crops: # Iterates through videos that have at least one valid frame
+            videos_processed += 1
+            video_name = filtered_video["video"]
+            # Construct the full path to the video file. Search recursively.
+            video_path = None
+            for root, dirs, files in os.walk(video_folder):
+                for file in files:
+                    if os.path.splitext(file)[0] == video_name:
+                        video_path = os.path.join(root, file)
+                        break
+                if video_path:
+                    break
+
+            if not video_path:
+                warn(f"WARNING: Video file for '{video_name}' not found in '{video_folder}' or subdirectories.")
+                continue # Skip this video if the file isn't found
+            
+            progress(f"Processing video {videos_processed}/{len(filtered_crops)}: {video_name}")
+            
+            # Reset frame counter for each video
+            frame_counter = 0
+            frames_saved_for_video = 0
 
             # cv2 video image loop
             cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                warn(f"Could not open video: {video_path}")
+                continue
+                
             width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
             height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            # Create a set of frame numbers that need processing for this video based on filtered_crops
+            frames_to_process = {frame["frame"] for frame in filtered_video["frames"]}
+            # Create a lookup for the filtered main crops that passed the condition check
+            passed_main_crops_lookup = {} # { frame_number: set(track_id_of_passed_main_crop) }
+            for frame_data in filtered_video["frames"]:
+                frame_num = frame_data["frame"]
+                # Store the unique identifiers (track id) of the main class crops that passed
+                passed_main_crops_lookup[frame_num] = {crop["track"] for crop in frame_data["crops"] if crop["class"] == main_class}
+            
+            progress(f"Video has {total_frames} frames, will process approximately {len(frames_to_process)} frames based on filters and spacing")
+            
             while cap.isOpened():
                 ret, image = cap.read()
                 if not ret:
                     break
-                frame_number = cap.get(cv2.CAP_PROP_POS_FRAMES)
-                for frame_data in video["frames"]:
-                    if frame_data["frame"] == frame_number:
-                        crops = get_crops_from_frames(image, frame_data, width, height)
-                        for crop_image, crop in crops:
-                            save_path = os.path.join(output_folder, video_name, crop["track"], f"{frame_number}.png")
-                            print(f"Saving crop to {save_path}")
-                            cv2.imwrite(save_path, crop_image)
-                        continue
+                    
+                frame_number = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                
+                # Apply frame spacing and check if the frame is in the filtered set
+                if frame_number in frames_to_process and frame_counter % frame_spacing == 0:
+                    # Get the original frame data for this frame number
+                    original_frame_data = original_crops_lookup[video_name].get(frame_number)
+                    
+                    if original_frame_data:
+                        # Generate all potential crop images for this frame
+                        # get_crops_from_frames yields (image_crop, crop_metadata)
+                        potential_crops = get_crops_from_frames(image, original_frame_data, width, height)
+
+                        for crop_image, crop_metadata in potential_crops:
+                            crop_class = crop_metadata["class"]
+                            crop_track = crop_metadata["track"]
+                            save_this_crop = False
+
+                            # Condition 1: Is it a main class crop that passed the filter?
+                            if crop_class == main_class:
+                                passed_crops_for_frame = passed_main_crops_lookup.get(frame_number, set())
+                                if crop_track in passed_crops_for_frame:
+                                    save_this_crop = True
+
+                            # Condition 2: Is it a conditional class crop and the option is enabled?
+                            # Check if not already marked for saving to avoid double saves if main == conditional
+                            if not save_this_crop and export_conditional and crop_class in conditional_classes:
+                                save_this_crop = True
+
+                            if save_this_crop:
+                                # Create class-specific directory
+                                save_dir = os.path.join(output_folder, video_name, crop_track, crop_class)
+                                os.makedirs(save_dir, exist_ok=True)
+
+                                # Save the crop
+                                save_path = os.path.join(save_dir, f"{frame_number}.png")
+                                debug(f"Saving {crop_class} crop to {save_path}")
+                                cv2.imwrite(save_path, crop_image)
+                                total_saved_frames += 1
+                                frames_saved_for_video += 1
+                
+                frame_counter += 1
+                
+                # Give feedback every 100 frames
+                if frame_counter % 100 == 0:
+                    progress(f"Processed {frame_counter}/{total_frames} frames from {video_name}")
+            
+            # Close the video capture
+            cap.release()
+            
+            progress(f"Completed {video_name}: Saved {frames_saved_for_video} frames")
+            
+        progress(f"Processing complete! Saved {total_saved_frames} frames using spacing of {frame_spacing}")
 
 def rotate_point(px, py, cx, cy, angle):
     """Rotate a point (px, py) around (cx, cy) by angle in degrees."""
@@ -556,6 +663,7 @@ def run_ui():
     # Variables to track selections
     selected_class_var = tk.StringVar()
     selected_classes_list = []
+    export_conditional_var = tk.BooleanVar()
 
     def update_class_ui_elements(class_list):
         """
@@ -722,9 +830,19 @@ def run_ui():
     scrollbar.grid(row=9, column=2, sticky="ns", pady=(0, 32))
     class_listbox.config(yscrollcommand=scrollbar.set)
 
+    # --- Export Conditional Crops Checkbox ---
+    export_conditional_checkbox = ttk.Checkbutton(
+        left_frame,
+        text="Export All",
+        variable=export_conditional_var,
+        onvalue=True,
+        offvalue=False
+    )
+    export_conditional_checkbox.grid(row=10, column=1, sticky="w", pady=(5, 0))
+
     # --- Buttons: Save, Load, and Run ---
     button_frame = ttk.Frame(left_frame)
-    button_frame.grid(row=10, column=0, columnspan=2, pady=(20, 0))
+    button_frame.grid(row=11, column=0, columnspan=2, pady=(20, 0))
 
 
     def on_save():
@@ -736,6 +854,7 @@ def run_ui():
         selection = class_listbox.curselection()
         print(selection)
         config_data["selected_classes_selected"] = [class_listbox.get(i) for i in selection]
+        config_data["export_conditional_crops"] = export_conditional_var.get()
         save_config(config_data)
         log("==============================")
         log("Configuration saved.")
@@ -749,8 +868,9 @@ def run_ui():
         spacing_entry.delete(0, "end")
         spacing_entry.insert(0, str(frame_spacing_var.get()))
 
+        # Load checkbox state
+        export_conditional_var.set(new_config.get("export_conditional_crops", False))
 
-     
         check_and_log_class_list(annotation_file_var.get(), log)
         selected_class_var.set(new_config.get("selected_class", ""))
         # Restore listbox selections
@@ -772,6 +892,7 @@ def run_ui():
         frame_spacing = frame_spacing_var.get()
         selected_class = selected_class_var.get()
         selected_classes_selected = [class_listbox.get(i) for i in class_listbox.curselection()]
+        export_conditional = export_conditional_var.get()
 
 
         log("==============================")
@@ -782,6 +903,7 @@ def run_ui():
         log(f"Frame Spacing: {frame_spacing}")
         log(f"Target Class: {selected_class}")
         log(f"Conditional Classes: {selected_classes_selected}")
+        log(f"Export Conditional Crops: {export_conditional}")
 
 
         # class_list = get_class_list_from_annotation_file(annotation_file)
@@ -791,7 +913,12 @@ def run_ui():
         # Process the annotations and create the folder structure, passing the UI log function
         # so warnings are output in the UI, not debug messages.
 
-        process_annotations_and_create_folders(video_folder, annotation_file, output_folder, selected_class, selected_classes_selected, logger=log)
+        process_annotations_and_create_folders(
+            video_folder, annotation_file, output_folder,
+            selected_class, selected_classes_selected,
+            logger=log, frame_spacing=frame_spacing,
+            export_conditional=export_conditional
+        )
 
 
     save_button = ttk.Button(button_frame, text="Save", command=on_save)
